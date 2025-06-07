@@ -1,79 +1,190 @@
 import streamlit as st
+import os
+import requests
+from bs4 import BeautifulSoup
+from urllib.parse import urljoin, urlparse
+from googlesearch import search
+import time
+
 import chromadb
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_groq import ChatGroq
 from langchain_chroma import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_community.document_loaders import PyPDFLoader, TextLoader
 from langchain.chains import create_retrieval_chain
 from langchain.chains.combine_documents import create_stuff_documents_chain
 
-# --- 1. SETUP - This part connects to our Brain and Memory ---
-
-# Initialize the LLM from Groq (The "Brain")
-llm = ChatGroq(
-    model_name="llama3-8b-8192",
-    temperature=0.7
-)
-
-# --- CORRECTED DATABASE CONNECTION ---
-# Set up the connection to our local, file-based vector database
+# --- CONFIGURATION ---
 DB_PATH = "db"
+DOWNLOAD_FOLDER = "travel_guides/"
+NUM_RESULTS_PER_QUERY = 3  # Kept it low to make research faster for the UI
 
-# This is the line we are fixing. 
-# We explicitly tell the model to run on the CPU to avoid device errors.
-embeddings = HuggingFaceEmbeddings(
-    model_name="all-MiniLM-L6-v2",
-    model_kwargs={'device': 'cpu'} 
-)
+# --- HELPER FUNCTIONS for Research & Ingestion ---
 
-# Load the existing vector store from the local folder
-vectorstore = Chroma(
-    persist_directory=DB_PATH,
-    embedding_function=embeddings
-)
+def save_webpage_as_text(url, folder, status_area):
+    try:
+        status_area.write(f"-> Scraping article: {url}")
+        response = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=15)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, 'html.parser')
 
-# Create a retriever, which is a tool to search our database
-retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
+        title = soup.title.string if soup.title else urlparse(url).path.strip('/')[-20:]
+        safe_title = "".join(c for c in title if c.isalnum() or c in (' ', '_')).rstrip()
+        file_name = os.path.join(folder, f"{safe_title}.txt")
 
-# --- 2. THE RAG CHAIN - This part defines the agent's workflow ---
+        if os.path.exists(file_name):
+            status_area.write(f"  - Already exists: {file_name}")
+            return
 
-# This is the prompt template. It tells the AI how to behave.
-system_prompt = (
-    "You are an expert travel assistant. Your task is to answer the user's question "
-    "based ONLY on the context provided from the travel guide. "
-    "Do not use your own general knowledge. If the information is not in the context, "
-    "say 'I'm sorry, that information is not available in the travel guide.'\n\n"
-    "Context: {context}"
-)
+        text_content = "".join(p.get_text(separator=" ", strip=True) + "\n\n" for p in soup.find_all('p'))
 
-prompt = ChatPromptTemplate.from_messages(
-    [
-        ("system", system_prompt),
-        ("human", "{input}"),
-    ]
-)
+        if text_content:
+            with open(file_name, 'w', encoding='utf-8') as f:
+                f.write(text_content)
+            status_area.write(f"  - Successfully saved: {file_name}")
+        else:
+            status_area.write(f"  - No paragraph text found. Skipping.")
 
-# This chain takes the user's question and the retrieved documents and stuffs them into the prompt.
-question_answer_chain = create_stuff_documents_chain(llm, prompt)
+    except Exception as e:
+        status_area.write(f"  - Failed to process webpage {url}. Reason: {e}")
 
-# This is the final chain. It combines the retriever and the question-answer chain.
-rag_chain = create_retrieval_chain(retriever, question_answer_chain)
+def save_pdf(url, folder, status_area):
+    try:
+        status_area.write(f"-> Downloading PDF: {url}")
+        file_name = os.path.join(folder, os.path.basename(urlparse(url).path))
 
+        if os.path.exists(file_name):
+            status_area.write(f"  - Already exists: {file_name}")
+            return
 
-# --- 3. THE APP - This is the Streamlit user interface ---
+        pdf_response = requests.get(url, stream=True, headers={'User-Agent': 'Mozilla/5.0'}, timeout=15)
+        pdf_response.raise_for_status()
 
-st.title("✈️ VoyageAI: Your Personal Travel Planner")
-st.write("Ask me a question about the destinations in my travel guide, and I'll create a plan for you!")
+        with open(file_name, 'wb') as f:
+            for chunk in pdf_response.iter_content(chunk_size=8192):
+                f.write(chunk)
+        status_area.write(f"  - Successfully downloaded: {file_name}")
 
-# Get user input from a text box
-user_query = st.text_input("For example: 'What are the best street food places to visit in Lucknow?'")
+    except Exception as e:
+        status_area.write(f"  - Failed to download {url}. Reason: {e}")
 
-# If the user has typed something, run the AI
-if user_query:
-    with st.spinner("Thinking..."):
-        # Send the's query to our RAG chain
-        response = rag_chain.invoke({"input": user_query})
+def ingest_new_content(status_area):
+    """Function to run the ingestion process and show status in Streamlit."""
+    status_area.write("### 🧠 Updating AI Memory...")
+    
+    # --- Loading ---
+    status_area.write("-> Loading new documents...")
+    documents = []
+    for file_path in os.listdir(DOWNLOAD_FOLDER):
+        full_path = os.path.join(DOWNLOAD_FOLDER, file_path)
+        try:
+            if file_path.endswith(".pdf"):
+                loader = PyPDFLoader(full_path)
+                documents.extend(loader.load())
+            elif file_path.endswith(".txt"):
+                loader = TextLoader(full_path)
+                documents.extend(loader.load())
+        except Exception as e:
+            status_area.write(f"  - Error loading {file_path}: {e}")
+            continue
+    status_area.write(f"-> Loaded {len(documents)} documents.")
+
+    # --- Splitting ---
+    if documents:
+        status_area.write("-> Splitting documents into chunks...")
+        text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
+        docs = text_splitter.split_documents(documents)
+        status_area.write(f"-> Split into {len(docs)} chunks.")
+
+        # --- Embedding & Storing ---
+        status_area.write("-> Creating embeddings and storing in database (this may take a moment)...")
+        embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2", model_kwargs={'device': 'cpu'})
         
-        # Display the answer
-        st.markdown("### Here is my suggestion:")
-        st.write(response["answer"])
+        vectorstore = Chroma.from_documents(
+            documents=docs,
+            embedding=embeddings,
+            persist_directory=DB_PATH
+        )
+        status_area.write("✅ AI Memory Updated Successfully!")
+        time.sleep(2) # Wait a moment before clearing the status
+    else:
+        status_area.write("No new documents to process.")
+
+# --- MAIN APP UI ---
+
+st.set_page_config(layout="wide")
+
+st.sidebar.title("Navigation")
+page = st.sidebar.radio("Go to", ["AI Travel Planner", "Conduct New Research"])
+
+if page == "AI Travel Planner":
+    st.title("✈️ VoyageAI: Your Personal Travel Planner")
+    st.write("Ask me a question about the destinations in my knowledge base, and I'll create a plan for you!")
+
+    # Check if the database exists before creating the RAG chain
+    if not os.path.exists(DB_PATH):
+        st.warning("The knowledge base is empty. Please go to the 'Conduct New Research' page to add information.")
+    else:
+        # --- RAG CHAIN SETUP ---
+        llm = ChatGroq(model_name="llama3-8b-8192", temperature=0.7)
+        embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2", model_kwargs={'device': 'cpu'})
+        vectorstore = Chroma(persist_directory=DB_PATH, embedding_function=embeddings)
+        retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
+
+        system_prompt = (
+            "You are an expert travel assistant. Your task is to answer the user's question "
+            "based ONLY on the context provided from the travel guide. "
+            "Do not use your own general knowledge. If the information is not in the context, "
+            "say 'I'm sorry, that information is not available in the travel guide.'\n\n"
+            "Context: {context}"
+        )
+        prompt = ChatPromptTemplate.from_messages([("system", system_prompt), ("human", "{input}")])
+        Youtube_chain = create_stuff_documents_chain(llm, prompt)
+        rag_chain = create_retrieval_chain(retriever, Youtube_chain)
+
+        # --- CHAT UI ---
+        user_query = st.text_input("For example: 'What are the best street food places to visit in Lucknow?'")
+        if user_query:
+            with st.spinner("Thinking..."):
+                response = rag_chain.invoke({"input": user_query})
+                st.markdown("### Here is my suggestion:")
+                st.write(response["answer"])
+
+elif page == "Conduct New Research":
+    st.title("🔬 Conduct New Research")
+    st.write("Add new knowledge to the AI by telling it what topics to research on the internet.")
+
+    query = st.text_input("Enter a research topic (e.g., 'hidden gems of Rajasthan')")
+
+    if st.button("Start Research"):
+        if query:
+            os.makedirs(DOWNLOAD_FOLDER, exist_ok=True)
+            
+            # Use an empty placeholder to show status updates in real-time
+            status_area = st.empty()
+            
+            status_area.write(f"### 🔍 Searching for: '{query}'")
+            try:
+                found_urls = list(search(query, num_results=NUM_RESULTS_PER_QUERY))
+                status_area.write(f"  - Found {len(found_urls)} potential links. Processing now...")
+                time.sleep(2)
+
+                for url in found_urls:
+                    if url.lower().endswith('.pdf'):
+                        save_pdf(url.strip(), DOWNLOAD_FOLDER, status_area)
+                    else:
+                        save_webpage_as_text(url.strip(), DOWNLOAD_FOLDER, status_area)
+                    time.sleep(1)
+                
+                status_area.write("✅ Research and download complete. Now updating AI memory...")
+                time.sleep(2)
+                
+                # After scraping, run the ingestion process
+                ingest_new_content(status_area)
+
+            except Exception as e:
+                st.error(f"An error occurred during research: {e}")
+        else:
+            st.warning("Please enter a research topic.")
