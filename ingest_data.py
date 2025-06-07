@@ -1,49 +1,59 @@
+import os
 import chromadb
-from langchain_community.document_loaders import PyPDFLoader, DirectoryLoader
+from langchain_community.document_loaders import PyPDFLoader, DirectoryLoader, TextLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_community.vectorstores import Chroma
-from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_chroma import Chroma
+from langchain_huggingface import HuggingFaceEmbeddings
 
-# This is the path to the folder where you have stored your travel guide PDF
+# This is the path to the folder where you have stored your content
 DATA_PATH = "travel_guides/"
 # This is the path to the directory where we will store our vector database
 DB_PATH = "db"
 
-# --- 1. Load the documents ---
-print("Loading documents...")
-# The DirectoryLoader will find and load all PDF files in the specified folder
-loader = DirectoryLoader(DATA_PATH, glob="**/*.pdf", loader_cls=PyPDFLoader)
-documents = loader.load()
-print(f"Loaded {len(documents)} document(s).")
+# --- 1. Load documents with robust error handling ---
+print("Loading documents from multiple formats (PDFs, TXTs)...")
 
+documents = []
+# Iterate through all files in the directory
+for file_path in os.listdir(DATA_PATH):
+    full_path = os.path.join(DATA_PATH, file_path)
+    try:
+        if file_path.endswith(".pdf"):
+            loader = PyPDFLoader(full_path)
+            documents.extend(loader.load())
+        elif file_path.endswith(".txt"):
+            loader = TextLoader(full_path)
+            documents.extend(loader.load())
+    except Exception as e:
+        # If loading a file fails, print an error and skip it
+        print(f"Error loading file: {full_path}")
+        print(f"Reason: {e}\n")
+        continue
+
+print(f"Successfully loaded {len(documents)} document(s) in total.")
 
 # --- 2. Split the documents into chunks ---
-print("Splitting documents into chunks...")
-# We split the loaded documents into smaller chunks to make them easier to process
-text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
-docs = text_splitter.split_documents(documents)
-print(f"Split into {len(docs)} chunks.")
+if documents:
+    print("Splitting documents into chunks...")
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
+    docs = text_splitter.split_documents(documents)
+    print(f"Split into {len(docs)} chunks.")
 
+    # --- 3. Create embeddings and store in a local database ---
+    print("Creating embeddings and storing in the database... This may take a moment.")
+    embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2", model_kwargs={'device': 'cpu'})
 
-# --- 3. Create embeddings and store in ChromaDB ---
-print("Creating embeddings and storing in the database... This may take a moment.")
-# We use a powerful sentence transformer model to create numerical representations (embeddings) of our text chunks
-embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+    # This creates a persistent, file-based database in the 'db' folder.
+    vectorstore = Chroma.from_documents(
+        documents=docs,
+        embedding=embeddings,
+        persist_directory=DB_PATH # This tells Chroma where to save the files
+    )
 
-# We need to explicitly create a client to connect to the running ChromaDB server.
-# This is the section that fixes the previous error.
-client = chromadb.HttpClient(host='localhost', port=8000)
+    print("-------------------")
+    print("✅ Data ingestion complete! The 'memory' has been created.")
+    print(f"✅ The vector database is now stored in the '{DB_PATH}/' directory.")
+    print("-------------------")
+else:
+    print("No documents were successfully loaded. Skipping database creation.")
 
-# Now, we create the Chroma vector store, telling it to use our new client
-# and a collection name for our data.
-vectorstore = Chroma.from_documents(
-    documents=docs,
-    embedding=embeddings,
-    client=client, # Use the new client
-    collection_name="travel_guides_collection", # Give a name to our collection
-    persist_directory=DB_PATH # The directory to save the data
-)
-print("-------------------")
-print("✅ Data ingestion complete! The 'memory' has been created.")
-print(f"✅ The vector database is stored in the '{DB_PATH}/' directory.")
-print("-------------------")

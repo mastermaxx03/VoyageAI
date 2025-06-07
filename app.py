@@ -10,30 +10,34 @@ from langchain.chains.combine_documents import create_stuff_documents_chain
 # --- 1. SETUP - This part connects to our Brain and Memory ---
 
 # Initialize the LLM from Groq (The "Brain")
-# This is the same as in Phase 1
 llm = ChatGroq(
     model_name="llama3-8b-8192",
     temperature=0.7
 )
 
-# Set up the connection to our vector database (The "Memory")
-embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-client = chromadb.HttpClient(host='localhost', port=8000)
+# --- CORRECTED DATABASE CONNECTION ---
+# Set up the connection to our local, file-based vector database
+DB_PATH = "db"
 
-# Load the existing vector store
+# This is the line we are fixing. 
+# We explicitly tell the model to run on the CPU to avoid device errors.
+embeddings = HuggingFaceEmbeddings(
+    model_name="all-MiniLM-L6-v2",
+    model_kwargs={'device': 'cpu'} 
+)
+
+# Load the existing vector store from the local folder
 vectorstore = Chroma(
-    client=client,
-    collection_name="travel_guides_collection",
+    persist_directory=DB_PATH,
     embedding_function=embeddings
 )
 
 # Create a retriever, which is a tool to search our database
-retriever = vectorstore.as_retriever(search_kwargs={"k": 3}) # "k: 3" means it will find the top 3 most relevant chunks
+retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
 
 # --- 2. THE RAG CHAIN - This part defines the agent's workflow ---
 
 # This is the prompt template. It tells the AI how to behave.
-# It has placeholders for {context} (from our database) and {input} (from the user).
 system_prompt = (
     "You are an expert travel assistant. Your task is to answer the user's question "
     "based ONLY on the context provided from the travel guide. "
@@ -53,7 +57,6 @@ prompt = ChatPromptTemplate.from_messages(
 question_answer_chain = create_stuff_documents_chain(llm, prompt)
 
 # This is the final chain. It combines the retriever and the question-answer chain.
-# It automatically performs the search (retrieve) and then generates the answer (generate).
 rag_chain = create_retrieval_chain(retriever, question_answer_chain)
 
 
@@ -68,7 +71,7 @@ user_query = st.text_input("For example: 'What are the best street food places t
 # If the user has typed something, run the AI
 if user_query:
     with st.spinner("Thinking..."):
-        # Send the user's query to our RAG chain
+        # Send the's query to our RAG chain
         response = rag_chain.invoke({"input": user_query})
         
         # Display the answer
