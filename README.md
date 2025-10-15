@@ -1,5 +1,3 @@
-Of course. Here is a more concise README for your project.
-
 -----
 
 # ✈️ VoyageAI: Your Personal AI Travel Planner
