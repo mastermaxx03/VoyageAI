@@ -4,12 +4,13 @@ from langchain_huggingface import HuggingFaceEmbeddings
 from langchain.chains import create_retrieval_chain
 from langchain.chains.combine_documents import create_stuff_documents_chain
 from langchain_core.prompts import ChatPromptTemplate
+import os
 api_key = "***REMOVED***"
 # --- CONFIGURATION ---
 DB_PATH = "db_markdown" # Point to your NEW database
 
 # --- RAG CHAIN SETUP ---
-llm = ChatGroq(groq_api_key=api_key,model_name="meta-llama/llama-4-maverick-17b-128e-instruct", temperature=0.7)
+llm = ChatGroq(groq_api_key=os.getenv("GROQ_API_KEY"),model_name="meta-llama/llama-4-maverick-17b-128e-instruct", temperature=0.7)
 embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
 vectorstore = Chroma(persist_directory=DB_PATH, embedding_function=embeddings)
 retriever = vectorstore.as_retriever()
