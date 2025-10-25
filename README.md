@@ -14,7 +14,7 @@ VoyageAI is an intelligent, self-updating travel planner that uses a Retrieval-A
 ## ⚙️ How It Works
 
 1.  **Offline Pipeline**: The `intelligent_agent.py` script searches the web for travel guides, uses Docling to process them into clean markdown, and `ingest_data.py` builds a Chroma vector database from this content.
-2.  **Online Querying**: The `app.py` Streamlit app loads the pre-built database. [cite\_start]When a user asks a question, it retrieves the most relevant information and uses a Groq LLM to generate a context-aware answer[cite: 16, 17, 18].
+2.  **Online Querying**: The `app.py` Streamlit app loads the pre-built database. When a user asks a question, it retrieves the most relevant information and uses a Groq LLM to generate a context-aware answer.
 
 ## 🛠️ Tech Stack
 
